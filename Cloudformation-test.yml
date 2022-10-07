@@ -1,0 +1,277 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Couldformation test template
+
+Resources:
+  RoleForEC2:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: cf-instance-service-role
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+      - arn:aws:iam::aws:policy/CloudWatchFullAccess
+      - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+              - ec2.amazonaws.com
+          Action:
+          - sts:AssumeRole
+  
+  InstanceProfile: 
+    Type: AWS::IAM::InstanceProfile
+    Properties: 
+      Path: "/"
+      Roles: 
+        - !Ref RoleForEC2
+  
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: cf-security-group
+      GroupName: cf-security-group
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+      VpcId: !GetAtt VPC.VpcId
+  
+  LaunchTemplateForASG:
+    Type: 'AWS::EC2::LaunchTemplate'
+    Properties:
+      LaunchTemplateName: cf-launch-template-for-asg
+      LaunchTemplateData:
+        NetworkInterfaces:
+          - DeviceIndex: 0
+            AssociatePublicIpAddress: true
+            Groups:
+              - !GetAtt SecurityGroup.GroupId
+            DeleteOnTermination: true
+            SubnetId: !Ref Subnet1
+        ImageId: ami-026b57f3c383c2eec
+        InstanceType: t2.micro
+        IamInstanceProfile:
+          Arn: !GetAtt InstanceProfile.Arn
+        Monitoring:
+          Enabled: true
+        MetadataOptions:
+          HttpEndpoint: enabled
+        UserData:
+          Fn::Base64:
+            !Sub |
+              #!/bin/bash
+              sudo yum update -y
+              sudo amazon-linux-extras install nginx1 -y 
+              sudo systemctl enable nginx
+              sudo systemctl start nginx
+              sudo chmod 646 /usr/share/nginx/html/index.html
+              curl -sL http://169.254.169.254/latest/meta-data/public-hostname > /usr/share/nginx/html/index.html
+              sudo yum install amazon-cloudwatch-agent -y
+              sudo touch /opt/aws/amazon-cloudwatch-agent/bin/config.json
+              sudo chmod 646 /opt/aws/amazon-cloudwatch-agent/bin/config.json
+              sudo echo -e "      {\n\
+                \"agent\": {\n\
+                  \"metrics_collection_interval\": 60,\n\
+                  \"run_as_user\": \"root\"\n\
+                },\n\
+                \"metrics\": {\n\
+                  \"append_dimensions\": {\n\
+                    \"InstanceId\": \"\${!aws:InstanceId}\"\n\
+                  },\n\
+                  \"metrics_collected\": {\n\
+                    \"collectd\": {\n\
+                      \"metrics_aggregation_interval\": 60\n\
+                    },\n\
+                    \"mem\": {\n\
+                      \"measurement\": [\n\
+                        \"mem_used_percent\"\n\
+                      ],\n\
+                      \"metrics_collection_interval\": 60\n\
+                    },\n\
+                    \"statsd\": {\n\
+                      \"metrics_aggregation_interval\": 60,\n\
+                      \"metrics_collection_interval\": 60,\n\
+                      \"service_address\": \":8125\"\n\
+                    }\n\
+                  }\n\
+                }\n\
+              }\n" > /opt/aws/amazon-cloudwatch-agent/bin/config.json
+              sudo mkdir /usr/share/collectd
+              sudo touch /usr/share/collectd/types.db
+              cd /opt/aws/amazon-cloudwatch-agent/bin/
+              sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -c file:config.json -s
+              sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -m ec2 -a start
+  
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplateForASG
+        Version: !GetAtt LaunchTemplateForASG.LatestVersionNumber
+      MaxSize: '5'
+      MinSize: '3'
+      DesiredCapacity: '3'
+      HealthCheckType: EC2
+      HealthCheckGracePeriod: 300
+      TargetGroupARNs: 
+        - !Ref TargetGroup
+      AvailabilityZones:
+        - us-east-1a
+        - us-east-1b
+      VPCZoneIdentifier:
+        - !Ref Subnet1
+        - !Ref Subnet2
+      
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: cf-application-load-balancer
+      Type: application
+      Scheme: internet-facing
+      IpAddressType: ipv4
+      Subnets:
+        - !Ref Subnet1
+        - !Ref Subnet2
+      SecurityGroups: 
+        - !GetAtt SecurityGroup.GroupId
+      LoadBalancerAttributes:
+        - Key: access_logs.s3.enabled
+          Value: true
+        - Key: access_logs.s3.bucket
+          Value: !Ref LogsS3Bucket
+        - Key: access_logs.s3.prefix
+          Value: alb_logs
+      
+  HTTPListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          ForwardConfig:
+            TargetGroups:
+              - TargetGroupArn: !Ref TargetGroup
+                Weight: 1
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+  
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: cf-target-group
+      Protocol: HTTP
+      ProtocolVersion: HTTP1
+      Port: 80
+      VpcId: !GetAtt VPC.VpcId
+  
+  LogsS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties: 
+      BucketName: !Sub '${AWS::AccountId}-cf-logs-bucket'
+      AccessControl: Private
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  LogsS3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties: 
+      Bucket: !Ref LogsS3Bucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: arn:aws:iam::127311923021:root
+            Action: s3:PutObject
+            Resource: !Sub 'arn:aws:s3:::${LogsS3Bucket}/alb_logs/AWSLogs/${AWS::AccountId}/*'
+          - Effect: Allow
+            Principal:
+              Service: delivery.logs.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub 'arn:aws:s3:::${LogsS3Bucket}/alb_logs/AWSLogs/${AWS::AccountId}/*'
+            Condition:
+              StringEquals:
+                s3:x-amz-acl: bucket-owner-full-control
+          - Effect: Allow
+            Principal:
+              Service: delivery.logs.amazonaws.com
+            Action: s3:GetBucketAcl
+            Resource: !Sub 'arn:aws:s3:::${LogsS3Bucket}'
+  
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/24
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+  
+  Subnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !GetAtt VPC.VpcId
+      CidrBlock: 10.0.0.0/25
+      AvailabilityZone: us-east-1a
+  
+  Subnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !GetAtt VPC.VpcId
+      CidrBlock: 10.0.0.128/25
+      AvailabilityZone: us-east-1b
+      
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+  
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties: 
+      InternetGatewayId: !GetAtt InternetGateway.InternetGatewayId
+      VpcId: !GetAtt VPC.VpcId
+  
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !GetAtt VPC.VpcId
+      
+  InternetRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: "0.0.0.0/0"
+      GatewayId: !Ref InternetGateway
+      RouteTableId: !Ref RouteTable
+  
+  Subnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref RouteTable
+      SubnetId: !Ref Subnet1
+
+  Subnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref RouteTable
+      SubnetId: !Ref Subnet2
+      
+Outputs:
+  LoadBalancerDNSName:
+    Description: Application load balancer DNS name
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+  
+  LogsS3BucketName:
+    Description: S3 bucket for the load balancer logs
+    Value: !Ref LogsS3Bucket
