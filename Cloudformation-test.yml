@@ -1,16 +1,109 @@
 ---
 AWSTemplateFormatVersion: '2010-09-09'
-Description: Couldformation test template
+Description: Cloudformation test template
+
+Parameters:
+  Prefix:
+    Description: Prefix for all resources being created
+    Type: String
+    Default: ""
+  ImageId:
+    Description: Image Id used in launch template
+    Type: String
+    Default: "ami-026b57f3c383c2eec"
+  InstanceSize:
+    Description: Instance size/family used in launch template
+    Type: String
+    Default: "t2.micro"
+  BlockDeviceName:
+    Description: The device name (for example, /dev/sdh or xvdh)
+    Type: String
+    Default: "/dev/sdh"
+  DiskType:
+    Description: EBS volume type used in launch template
+    Type: String
+    Default: "gp2"
+  DiskSize:
+    Description: EBS volume size used in launch template
+    Type: String
+    Default: "8"
+  AsgMinSize:
+    Description: Auto scaling group minimum size
+    Type: String
+    Default: "3"
+  AsgMaxSize:
+    Description: Auto scaling group maximum size
+    Type: String
+    Default: "5"
+  AsgDesired:
+    Description: Auto scaling group desired size
+    Type: String
+    Default: "3"
+  IpWhitelist:
+    Description: IP address used to access instances (for example, a single IPv4 address with the /32 prefix length or a range of IPv4 addresses in CIDR block notation)
+    Type: String
+    Default: "0.0.0.0/0"
+  KeyPairName:
+    Description: The name of the key pair used to connect to ec2 instances.
+    Type: String
+    Default: ""
+      
+Mappings:
+  ElbRegionMap:
+    us-east-1: 
+      ElbRegionValue: 127311923021
+    us-east-2:
+      ElbRegionValue: 033677994240
+    us-west-1:
+      ElbRegionValue: 027434742980
+    us-west-2:
+      ElbRegionValue: 797873946194
+    af-south-1:
+      ElbRegionValue: 098369216593
+    ap-east-1:
+      ElbRegionValue: 754344448648
+    ap-northeast-1:
+      ElbRegionValue: 582318560864
+    ap-northeast-2:
+      ElbRegionValue: 600734575887
+    ap-northeast-3:
+      ElbRegionValue: 383597477331
+    ap-southeast-1:
+      ElbRegionValue: 114774131450
+    ap-southeast-2:
+      ElbRegionValue: 783225319266
+    ap-southeast-3:
+      ElbRegionValue: 589379963580
+    ap-south-1:
+      ElbRegionValue: 718504428378
+    me-south-1:
+      ElbRegionValue: 076674570225
+    ca-central-1:
+      ElbRegionValue: 985666609251
+    eu-central-1:
+      ElbRegionValue: 054676820928
+    eu-west-1:
+      ElbRegionValue: 156460612806
+    eu-west-2:
+      ElbRegionValue: 652711504416
+    eu-south-1:
+      ElbRegionValue: 635631232127
+    eu-west-3:
+      ElbRegionValue: 009996457667
+    eu-north-1:
+      ElbRegionValue: 897822967062
+    sa-east-1:
+      ElbRegionValue: 507241528517
+    us-gov-west-1:
+      ElbRegionValue: 048591011584
+    us-gov-east-1:
+      ElbRegionValue: 190560391635
 
 Resources:
   RoleForEC2:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: cf-instance-service-role
-      ManagedPolicyArns:
-      - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
-      - arn:aws:iam::aws:policy/CloudWatchFullAccess
-      - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      RoleName: !Sub '${Prefix}instance-service-role-cloudwatch-metrics'
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -20,10 +113,34 @@ Resources:
               - ec2.amazonaws.com
           Action:
           - sts:AssumeRole
+      Policies:
+      - PolicyName: !Sub '${Prefix}instance-service-policy-cloudwatch-metrics'
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - cloudwatch:PutMetricData
+            - ec2:DescribeVolumes
+            - ec2:DescribeTags
+            - logs:PutLogEvents
+            - logs:DescribeLogStreams
+            - logs:DescribeLogGroups
+            - logs:CreateLogStream
+            - logs:CreateLogGroup
+            Resource:
+            - "*"
+          - Effect: Allow
+            Action:
+            - ssm:GetParameter
+            - ssm:PutParameter
+            Resource:
+            - arn:aws:ssm:*:*:parameter/AmazonCloudWatch-*
   
   InstanceProfile: 
     Type: AWS::IAM::InstanceProfile
-    Properties: 
+    Properties:
+      InstanceProfileName: !Sub '${Prefix}instance-profile-cloudwatch-metrics'
       Path: "/"
       Roles: 
         - !Ref RoleForEC2
@@ -31,8 +148,8 @@ Resources:
   SecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: cf-security-group
-      GroupName: cf-security-group
+      GroupDescription: security group which allows http, https and ssh
+      GroupName: !Sub '${Prefix}sg-allow-http-https-ssh'
       SecurityGroupIngress:
         - IpProtocol: tcp
           FromPort: 80
@@ -45,13 +162,13 @@ Resources:
         - IpProtocol: tcp
           FromPort: 22
           ToPort: 22
-          CidrIp: 0.0.0.0/0
+          CidrIp: !Ref IpWhitelist
       VpcId: !GetAtt VPC.VpcId
   
   LaunchTemplateForASG:
-    Type: 'AWS::EC2::LaunchTemplate'
+    Type: AWS::EC2::LaunchTemplate
     Properties:
-      LaunchTemplateName: cf-launch-template-for-asg
+      LaunchTemplateName: !Sub '${Prefix}launch-template-for-asg-with-nginx-and-cwa'
       LaunchTemplateData:
         NetworkInterfaces:
           - DeviceIndex: 0
@@ -59,11 +176,17 @@ Resources:
             Groups:
               - !GetAtt SecurityGroup.GroupId
             DeleteOnTermination: true
-            SubnetId: !Ref Subnet1
-        ImageId: ami-026b57f3c383c2eec
-        InstanceType: t2.micro
+        ImageId: !Ref ImageId
+        InstanceType: !Ref InstanceSize
+        BlockDeviceMappings: 
+          - DeviceName: !Ref BlockDeviceName
+            Ebs:
+              VolumeSize: !Ref DiskSize
+              VolumeType: !Ref DiskType
+              DeleteOnTermination: true
         IamInstanceProfile:
           Arn: !GetAtt InstanceProfile.Arn
+        KeyName: !Ref KeyPairName
         Monitoring:
           Enabled: true
         MetadataOptions:
@@ -81,69 +204,41 @@ Resources:
               sudo yum install amazon-cloudwatch-agent -y
               sudo touch /opt/aws/amazon-cloudwatch-agent/bin/config.json
               sudo chmod 646 /opt/aws/amazon-cloudwatch-agent/bin/config.json
-              sudo echo -e "      {\n\
-                \"agent\": {\n\
-                  \"metrics_collection_interval\": 60,\n\
-                  \"run_as_user\": \"root\"\n\
-                },\n\
-                \"metrics\": {\n\
-                  \"append_dimensions\": {\n\
-                    \"InstanceId\": \"\${!aws:InstanceId}\"\n\
-                  },\n\
-                  \"metrics_collected\": {\n\
-                    \"collectd\": {\n\
-                      \"metrics_aggregation_interval\": 60\n\
-                    },\n\
-                    \"mem\": {\n\
-                      \"measurement\": [\n\
-                        \"mem_used_percent\"\n\
-                      ],\n\
-                      \"metrics_collection_interval\": 60\n\
-                    },\n\
-                    \"statsd\": {\n\
-                      \"metrics_aggregation_interval\": 60,\n\
-                      \"metrics_collection_interval\": 60,\n\
-                      \"service_address\": \":8125\"\n\
-                    }\n\
-                  }\n\
-                }\n\
-              }\n" > /opt/aws/amazon-cloudwatch-agent/bin/config.json
+              sudo yum install jq -y
+              sudo echo -e '{"agent": {"metrics_collection_interval": 60, "run_as_user": "root"}, "metrics": {"append_dimensions": {"InstanceId": "${!aws:InstanceId}"}, "metrics_collected": {"collectd": {"metrics_aggregation_interval": 60}, "mem": {"measurement": ["mem_used_percent"], "metrics_collection_interval": 60}, "statsd": {"metrics_aggregation_interval": 60, "metrics_collection_interval": 60, "service_address": ":8125"} } } }' | jq '.' > /opt/aws/amazon-cloudwatch-agent/bin/config.json
               sudo mkdir /usr/share/collectd
               sudo touch /usr/share/collectd/types.db
-              cd /opt/aws/amazon-cloudwatch-agent/bin/
-              sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -c file:config.json -s
+              sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -c file:/opt/aws/amazon-cloudwatch-agent/bin/config.json -s
               sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -m ec2 -a start
   
   AutoScalingGroup:
     Type: AWS::AutoScaling::AutoScalingGroup
     Properties:
+      AutoScalingGroupName: !Sub '${Prefix}asg-with-nginx-and-cloudwatch-agent'
       LaunchTemplate:
         LaunchTemplateId: !Ref LaunchTemplateForASG
         Version: !GetAtt LaunchTemplateForASG.LatestVersionNumber
-      MaxSize: '5'
-      MinSize: '3'
-      DesiredCapacity: '3'
+      MaxSize: !Ref AsgMaxSize
+      MinSize: !Ref AsgMinSize
+      DesiredCapacity: !Ref AsgDesired
       HealthCheckType: EC2
       HealthCheckGracePeriod: 300
       TargetGroupARNs: 
         - !Ref TargetGroup
-      AvailabilityZones:
-        - us-east-1a
-        - us-east-1b
       VPCZoneIdentifier:
-        - !Ref Subnet1
-        - !Ref Subnet2
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
       
   ApplicationLoadBalancer:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:
-      Name: cf-application-load-balancer
+      Name: !Sub '${Prefix}alb-in-public'
       Type: application
       Scheme: internet-facing
       IpAddressType: ipv4
       Subnets:
-        - !Ref Subnet1
-        - !Ref Subnet2
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
       SecurityGroups: 
         - !GetAtt SecurityGroup.GroupId
       LoadBalancerAttributes:
@@ -170,7 +265,7 @@ Resources:
   TargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
-      Name: cf-target-group
+      Name: !Sub '${Prefix}target-group-http'
       Protocol: HTTP
       ProtocolVersion: HTTP1
       Port: 80
@@ -179,7 +274,7 @@ Resources:
   LogsS3Bucket:
     Type: AWS::S3::Bucket
     Properties: 
-      BucketName: !Sub '${AWS::AccountId}-cf-logs-bucket'
+      BucketName: !Sub '${Prefix}${AWS::AccountId}-application-load-balancer-logs-bucket'
       AccessControl: Private
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
@@ -196,7 +291,14 @@ Resources:
         Statement:
           - Effect: Allow
             Principal:
-              AWS: arn:aws:iam::127311923021:root
+              AWS: !Join
+                - ''
+                - - 'arn:aws:iam::'
+                  - Fn::FindInMap:
+                    - ElbRegionMap
+                    - !Ref AWS::Region
+                    - ElbRegionValue
+                  - ':root'
             Action: s3:PutObject
             Resource: !Sub 'arn:aws:s3:::${LogsS3Bucket}/alb_logs/AWSLogs/${AWS::AccountId}/*'
           - Effect: Allow
@@ -216,23 +318,23 @@ Resources:
   VPC:
     Type: AWS::EC2::VPC
     Properties:
-      CidrBlock: 10.0.0.0/24
+      CidrBlock: 10.0.0.0/16
       EnableDnsSupport: true
       EnableDnsHostnames: true
   
-  Subnet1:
+  PublicSubnet1:
     Type: AWS::EC2::Subnet
     Properties:
       VpcId: !GetAtt VPC.VpcId
-      CidrBlock: 10.0.0.0/25
-      AvailabilityZone: us-east-1a
+      CidrBlock: 10.0.0.0/24
+      AvailabilityZone: !Sub '${AWS::Region}a'
   
-  Subnet2:
+  PublicSubnet2:
     Type: AWS::EC2::Subnet
     Properties:
       VpcId: !GetAtt VPC.VpcId
-      CidrBlock: 10.0.0.128/25
-      AvailabilityZone: us-east-1b
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Sub '${AWS::Region}b'
       
   InternetGateway:
     Type: AWS::EC2::InternetGateway
@@ -243,29 +345,102 @@ Resources:
       InternetGatewayId: !GetAtt InternetGateway.InternetGatewayId
       VpcId: !GetAtt VPC.VpcId
   
-  RouteTable:
+  PublicRouteTable:
     Type: AWS::EC2::RouteTable
     Properties:
       VpcId: !GetAtt VPC.VpcId
       
-  InternetRoute:
+  PublicRoute:
     Type: AWS::EC2::Route
+    DependsOn:
+     - InternetGateway
+     - InternetGatewayAttachment
     Properties:
-      DestinationCidrBlock: "0.0.0.0/0"
+      DestinationCidrBlock: 0.0.0.0/0
       GatewayId: !Ref InternetGateway
-      RouteTableId: !Ref RouteTable
+      RouteTableId: !Ref PublicRouteTable
   
-  Subnet1RouteTableAssociation:
+  PublicSubnet1RouteTableAssociation:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
-      RouteTableId: !Ref RouteTable
-      SubnetId: !Ref Subnet1
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet1
 
-  Subnet2RouteTableAssociation:
+  PublicSubnet2RouteTableAssociation:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
-      RouteTableId: !Ref RouteTable
-      SubnetId: !Ref Subnet2
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet2
+      
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !GetAtt VPC.VpcId
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Sub '${AWS::Region}a'
+  
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !GetAtt VPC.VpcId
+      CidrBlock: 10.0.3.0/24
+      AvailabilityZone: !Sub '${AWS::Region}b'
+      
+  PrivateRouteTable1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !GetAtt VPC.VpcId
+      
+  PrivateRouteTable2:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !GetAtt VPC.VpcId
+      
+  PrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      SubnetId: !Ref PrivateSubnet1
+
+  PrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable2
+      SubnetId: !Ref PrivateSubnet2
+      
+  ElasticIP1:
+    Type: AWS::EC2::EIP
+    
+  ElasticIP2:
+    Type: AWS::EC2::EIP
+    
+  PublicNATGateway1:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt ElasticIP1.AllocationId
+      SubnetId: !Ref PublicSubnet1
+      
+  PublicNATGateway2:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt ElasticIP2.AllocationId
+      SubnetId: !Ref PublicSubnet2
+      
+  PrivateRoute1:
+    Type: AWS::EC2::Route
+    DependsOn: PublicNATGateway1
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !GetAtt PublicNATGateway1.NatGatewayId
+      RouteTableId: !Ref PrivateRouteTable1
+      
+  PrivateRoute2:
+    Type: AWS::EC2::Route
+    DependsOn: PublicNATGateway2
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !GetAtt PublicNATGateway2.NatGatewayId
+      RouteTableId: !Ref PrivateRouteTable2
       
 Outputs:
   LoadBalancerDNSName:
